@@ -1,0 +1,5 @@
+[deps]
+BcdV3 = "89e160cb-ea20-4259-ba03-99aaddda5992"
+MimuConstants = "e90da469-699c-4880-b306-ff2f90f43958"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
