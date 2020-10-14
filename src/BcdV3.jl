@@ -635,12 +635,13 @@ function bcd(r0, T0, b0, y_s, y_d, Q_inv, Ns, Na , Ng, g_mag,
         log_p_val = @sync mapreduce(n-> take!(logp_out[n]), +, 1:N_w)
         dlogp = log_p_prev - log_p_val
 
-        # @printf("%10s %5d logp %.8e  dlogp %.8e\n", "Tot", k, log_p_val,dlogp)
         log_p_prev = log_p_val
-        converged = k == i_max_bcd || abs(dlogp) < tol_bcd
+
         if callback != nothing
             callback(k, dlogp, log_p_val, r, T, b)
         end
+
+        converged = k == i_max_bcd || abs(dlogp) < tol_bcd
     end
     foreach(j -> put!(j, :done), job)
     return r, T, b
