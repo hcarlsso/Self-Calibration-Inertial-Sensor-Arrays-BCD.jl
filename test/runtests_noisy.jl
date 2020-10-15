@@ -22,7 +22,6 @@ function get_callback_maxdiff_prev(r_p, T_p, b_p, show_every = 1)
             b_p = deepcopy(b)
             # @printf(" C_norm %.8e\n", tr(T[4])/3)
         end
-        # println(k, " ", log_p)
     end
 
     return callback

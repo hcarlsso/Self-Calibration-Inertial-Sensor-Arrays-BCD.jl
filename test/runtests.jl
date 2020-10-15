@@ -1,11 +1,24 @@
-using Test
-
 using BcdV3
 using StaticArrays
 using MimuConstants
 using LinearAlgebra
+using Printf
 
-# Ω(x) = BcdV3.Ω(x)
+function get_callback_trace(trace, trace_p, show_every = 1)
+    function callback(k::Int, dlogp, log_p, r, T, b)
+        if mod(k,show_every) == 0
+            @printf("%15d logp %.20e  dlogp %.8e\n", k, log_p, dlogp)
+            # @printf(" C_norm %.8e\n", tr(T[4])/3)
+            push!(trace_p[:r], Array(r))
+            push!(trace_p[:T], Array.(T))
+            push!(trace_p[:b], Array.(b))
+            push!(trace_p[:k], k)
+        end
+        trace[k] = log_p
+    end
+    return callback
+end
+
 # Noise less simulations
 TT = Float64
 active_imus = [3,4,5,6, 27,28, 29, 30]
@@ -28,7 +41,7 @@ N = 40 # Dyn
 N_per_orientation = Int(N/5)
 Ns = ones(Int, N_orientions).*N_per_orientation
 show_every = 100
-N_bcd  = 400_000
+N_bcd  = 1000
 tol_dlogp = 1.0e-9
 pool = [1]
 # pool = workers()
@@ -63,30 +76,19 @@ y_d = [y_d_true[k,n] + 0.0*( k <= Na ? sig_a : sig_g)*randn(3) for k = 1:Nt, n =
 
 Q_inv = [SMatrix{3,3,Float64}(I)/( k <= Na ? sig_a^2 :  sig_g^2) for k = 1:Nt]
 
-b0 = [b_n + 0.0e-2*randn(3) for  b_n in b]
-T0 = [T[k] + 0.0e-3*(k == 1 ? triu(randn(3,3)) : randn(3,3))  for k = 1:Nt]
+b0 = [b_n + 1.0e-2*randn(3) for  b_n in b]
+T0 = [T[k] + 1.0e-3*(k == 1 ? triu(randn(3,3)) : randn(3,3))  for k = 1:Nt]
 r0_m = copy(r_m)
-r0_m[:,2:end] += 0.0e-3*randn(3,Na-1)
+r0_m[:,2:end] += 1.0e-3*randn(3,Na-1)
 r0 = SMatrix{3,Na}(r0_m)
+
+trace_log_p = zeros(N_bcd)
+trace_p = Dict(:r => [], :T => [], :b => [], :k => [])
 
 println("BCD v2")
 r_hat, T_hat, b_hat = @time bcd(
     r0, T0, b0, y_s, y_d, Q_inv, Ns, Na , Ng, g_mag, tol_dlogp, N_bcd,
     1.0e-12, 100, 1.0e-13, 200, pool;
     # callback = callback
-    callback = get_callback_maxdiff_param(r, T, b, show_every) #callback
+    callback = get_callback_trace(trace_log_p, trace_p, show_every) #callback
 )
-println("True")
-display(r |> Array)
-println("Hat")
-display(r_hat |> Array)
-println("r0")
-display(r0 |> Array)
-println("diff hat true")
-display(r_hat - r |> Array .|> abs)
-println("diff hat 0")
-display(r_hat - r0 |> Array .|> abs)
-println("sse r_hat")
-display(sum((r_hat - r).^2))
-println("sse r0")
-display(sum((r0 - r).^2))
