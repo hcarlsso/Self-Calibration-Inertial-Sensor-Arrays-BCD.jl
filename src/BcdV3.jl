@@ -9,7 +9,10 @@ export
     bcd,
     get_callback,
     get_callback_maxdiff_param,
-    Ω
+    Ω,
+    inverse_affine_Q,
+    inverse_affine,
+    dynamics
 
 
 op(x,y) = (x[1] + y[1], x[2] + y[2])
@@ -252,6 +255,11 @@ end
 ################################################################################
 # Data manipulation
 ################################################################################
+function inverse_affine(y, T, b)
+    u = [similar_type(y[k,n]) for k = 1:size(y,1), n = 1:size(y,2)]
+    inverse_affine!(u, y, T, b)
+    return u
+end
 function inverse_affine!(u, y, T, b)
     for n = 1:size(y,2)
         for k = 1:size(y,1)
@@ -259,6 +267,11 @@ function inverse_affine!(u, y, T, b)
         end
     end
     nothing
+end
+function inverse_affine_Q(Q_inv, T)
+    Qu_inv = [similar_type(Q_k) for Q_k in Q_inv]
+    inverse_affine_Q!(Qu_inv, Q_inv, T)
+    return Qu_inv
 end
 function inverse_affine_Q!(Qu_inv, Q_inv, T)
     for n = 1:length(Q_inv)
@@ -374,6 +387,25 @@ function gauss_newton(w::SVector{3,T}, e::SVector{N,T}, y, P, r, Ng::Int, g_tol,
 
     w::SVector{3,T}
 end
+function dynamics(w0::Vector{SVector{3,T}}, u, Qu_inv, r, Ng, ::Val{N_sens},
+    tol_gs, i_max_w) where {T, N_sens}
+
+    N_dynamics = length(w0)
+
+    w_dot = [zero(SVector{3,T}) for _ = 1:N_dynamics]
+    s = [zero(SVector{3,T}) for _ = 1:N_dynamics]
+
+    Qu_inv_tall::SMatrix{N_sens, N_sens, T, N_sens^2} =
+        SMatrix{N_sens, N_sens, T, N_sens^2}(cat(Qu_inv...; dims = (1,2)))
+    u_n = [zero(SVector{N_sens,T}) for _ = 1:N_dynamics]
+    for n = 1:N_dynamics
+        u_n[n] = cat_u(u[:,n], Val{N_sens}())
+    end
+    w = [copy(w0_n) for w0_n in w0]
+    dynamics!!(w, w_dot, s, u_n, Qu_inv_tall, r, Ng, tol_gs, i_max_w)
+
+    return w, w_dot, s
+end
 function dynamics!!(w::Vector{SVector{3,T}}, w_dot::Vector{SVector{3,T}}, s::Vector{SVector{3,T}},
     u::Vector{SVector{N,T}}, Qu_inv::SMatrix{N,N,T},
     r, Ng, g_tol, i_max) where{N,T}
@@ -465,16 +497,9 @@ function do_work(y::Matrix{SVector{3, TT}}, Q_inv, Ns, ::Val{N_sens}, ::Val{Na},
             inverse_affine!(u, y, T, b)
             inverse_affine_Q!(Qu_inv, Q_inv, T)
 
-            # @printf("%20s %.16e\n", "u", nlogp_naive(
-            #     y, Q_inv, Ns, r, T, b, g, w, w_dot, s
-            # ))
             if N_orientions > 0
                 gravity!(g, u, Qu_inv, Na, N_orientions, g_mag, tol_interval, i_max_g)
             end
-            # @printf("%20s %.16e\n", "g", nlogp_naive(
-            #     y, Q_inv, Ns, r, T, b, g, w, w_dot, s
-            # ))
-
 
             # Dynamics
             Qu_inv_tall::SMatrix{N_sens, N_sens, TT, N_sens^2} =
