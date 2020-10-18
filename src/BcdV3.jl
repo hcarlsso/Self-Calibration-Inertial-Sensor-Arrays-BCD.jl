@@ -5,8 +5,9 @@ using LinearAlgebra
 using Distributed
 using Printf
 using Base.Threads
+
 export
-    bcd,
+    bcd!,
     get_callback,
     get_callback_maxdiff_param,
     Ω,
@@ -14,58 +15,6 @@ export
     inverse_affine,
     dynamics
 
-
-op(x,y) = (x[1] + y[1], x[2] + y[2])
-
-function cat_u(x::Vector{SVector{3,T}}, ::Val{N}) where {T,N}
-    copy(reinterpret(SVector{N,T}, x) |> only)
-end
-
-function normalize_diagonals!(T::AbstractVector{<:SMatrix{3,3,TT,9}}) where {TT}
-    D_ii = CartesianIndex.(axes(T[1], 1), axes(T[1], 2))
-    N = length(T)
-    C = mapreduce(T_n -> tr(T_n), +, T)/(3*N)
-    for n = 1:N
-        T_n = zero(MMatrix{3,3,TT,9})
-        T_n .= T[n]
-        T_n[D_ii] ./= C
-        T[n] = SMatrix(T_n)
-    end
-    return T
-end
-
-function suff_stat_Tb_ref(y::Vector{SVector{3,T}}, Q_inv, u, Ns, Tb_out) where {T}
-    A_Tb, a_Tb = zero(SMatrix{9,9, T}), zero(SVector{9, T})
-    N_orientions = length(Ns)
-    for n = 1:length(y)
-        A = J_Tb_ref(u[n])
-        A_T_Q_inv = A'*Q_inv
-        if n <= N_orientions
-            A_T_Q_inv *= Ns[n]
-        end
-        A_Tb += A_T_Q_inv*A
-        a_Tb += A_T_Q_inv*y[n]
-    end
-    put!(Tb_out, (A_Tb, a_Tb))
-    nothing
-end
-function suff_stat_Tb(y::Matrix{SVector{3,T}}, Q_inv, u, Ns, Tb_out) where {T}
-    N_orientions = length(Ns)
-    for k = 2:size(y,1)
-        A_Tb, a_Tb = zero(SMatrix{12,12, T}), zero(SVector{12, T})
-        for n = 1:size(y,2)
-            A = J_Tb(u[k,n])
-            A_T_Q_inv = A'*Q_inv[k]
-            if n <= N_orientions
-                A_T_Q_inv *= Ns[n]
-            end
-            A_Tb += A_T_Q_inv*A
-            a_Tb += A_T_Q_inv*y[k,n]
-        end
-        put!(Tb_out[k-1], (A_Tb, a_Tb))
-    end
-    nothing
-end
 
 function nlogp(y::Matrix{SVector{3,type}}, u, T, b, Q_inv, Ns) where {type}
     C = Atomic{type}(0.0)
@@ -180,10 +129,10 @@ function T_ref(x::SVector{6,type}) where {type}
     T[3,3] = x[6]
     SMatrix(T)
 end
-function H!(H::AbstractMatrix{T}, r) where {T}
-    Na = size(r, 2)
+function H!(H::AbstractMatrix{T}, r::Vector{SVector{3,T}}) where {T}
+    Na = length(r)
     for k = 1:Na
-        H[1+3(k-1):3*k,1:3] = -Ω(r[:,k])
+        H[1+3(k-1):3*k,1:3] = -Ω(r[k])
     end
     nothing
 end
@@ -358,11 +307,11 @@ function gauss_newton(w::SVector{3,T}, e::SVector{N,T}, y, P, r, Ng::Int, g_tol,
         k += 1
 
         h!(y_pred, w, r, Ng)
+
         e = y - SVector(y_pred)
 
         J_h!(J_m, w, r, Ng)
         J = SMatrix(J_m)
-
 
         J_T_P = J'*P
         H = J_T_P*J
@@ -374,7 +323,6 @@ function gauss_newton(w::SVector{3,T}, e::SVector{N,T}, y, P, r, Ng::Int, g_tol,
         # ||Jp||/(1+||r||
         # Should acutally be  ||RJp||/(1+||Rr||  where R'R = P
         converged = k == i_max || norm(J*p, Inf) <  g_tol*(1.0 + norm(e, Inf))
-
     end
     if k == i_max
         crit = norm(SMatrix(J_m)*p, Inf)/(1.0 + norm(e, Inf))
@@ -443,280 +391,9 @@ function dynamics!!(w::Vector{SVector{3,T}}, w_dot::Vector{SVector{3,T}}, s::Vec
     end
     w, w_dot, s
 end
-function dynamics_threads!!(w::Vector{SVector{3,T}}, w_dot::Vector{SVector{3,T}},
-    s::Vector{SVector{3,T}},
-    u::Vector{SVector{N,T}}, Qu_inv::SMatrix{N,N,T},
-    r, Ng, g_tol, i_max) where{N,T}
-    N_dynamics = length(w)
-
-    H_m = zero(MMatrix{N, 6, T})
-    Na = size(r, 2)
-    fill_H_constants!(H_m, Na)
-    H!(H_m, r)
-    H = SMatrix(H_m)
-
-    y_pred = [zero(MVector{N, T}) for _ = 1:nthreads()]
-
-    inds_w_dot = @SVector [1,2,3]
-    inds_s = @SVector [4,5,6]
-
-    # Buffs
-    J_m = map(1:nthreads()) do n
-        J = zero(MMatrix{N, 3, T})
-        fill_J_h_buff!(J, Na, Ng)
-        J
-    end
-
-    H_T_Q_inv = H'*Qu_inv
-    WLS = (H_T_Q_inv*H)\H_T_Q_inv
-    P = Qu_inv - H_T_Q_inv'*WLS
-
-
-    @threads for n = 1:N_dynamics
-        e = zero(SVector{N, T})
-        phi = zero(SVector{6, T})
-        y_pred_i = y_pred[threadid()]
-        J_m_i = J_m[threadid()]
-
-        w[n] = gauss_newton(w[n], e, u[n], P, r, Ng, g_tol, i_max, y_pred_i, J_m_i)
-        h!(y_pred_i, w[n], r, Ng)
-        e = u[n] - SVector(y_pred_i)
-        phi = WLS*e
-        w_dot[n] = phi[inds_w_dot]
-        s[n] = phi[inds_s]
-    end
-    w, w_dot, s
-end
-
 ################################################################################
-# BCD loop
+# Callbacks
 ################################################################################
-function do_work(y::Matrix{SVector{3, TT}}, Q_inv, Ns, ::Val{N_sens}, ::Val{Na},
-    Ng, g_mag,
-    job, r_in, r_out, Tb_in, Tb_out, nlogp_ch,
-    tol_interval, i_max_g, tol_gs, i_max_w) where {TT, N_sens, Na}
-
-
-    N = size(y, 2)
-    N_triads = Na + Ng
-    N_orientions = length(Ns)
-    N_dynamics = N - N_orientions
-
-    println("Got # dynamic samples: ", N_dynamics)
-    println("Got # orientations: ", N_orientions)
-
-    u = [zero(SVector{3,TT}) for i = 1:N_triads, j = 1:N]
-    Qu_inv = [zero(SMatrix{3,3,TT}) for i = 1:N_triads]
-
-    # Statics
-    g = [zero(SVector{3,TT}) for _ = 1:N_orientions]
-
-    # Dynamics
-    u_n = [zero(SVector{N_sens,TT}) for _ = 1:N_dynamics]
-    # Qu_inv_tall = zero(SMatrix{N_sens, N_sens, TT})
-    # Initial w0 from gyroscopes
-    w = map(1:N_dynamics) do n
-        mapreduce(k -> y[Na + k, n + N_orientions], +, 1:Ng)/Ng
-    end
-    w_dot = [zero(SVector{3,TT}) for _ = 1:N_dynamics]
-    s = [zero(SVector{3,TT}) for _ = 1:N_dynamics]
-    Jrs = [zero(SMatrix{3,3,TT}) for _ = 1:N_dynamics]
-
-    # Initial values
-    r::SMatrix{3,Na,TT} = take!(r_in)
-    T::Vector{SMatrix{3,3,TT}}, b::Vector{SVector{3,TT}} = take!(Tb_in)
-
-    println("Start worker")
-    println("r0")
-    display(r)
-    println("T")
-    foreach(t -> display(t), T)
-    println("b")
-    foreach(t -> display(t), b)
-    # @printf("%20s %.8e\n", "Start ", nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, phi))
-    done = false
-    while !done
-
-        job_type = take!(job) # Blocking call
-        if job_type == :eta_r
-            inverse_affine!(u, y, T, b)
-            inverse_affine_Q!(Qu_inv, Q_inv, T)
-
-            if N_orientions > 0
-                gravity!(g, u, Qu_inv, Na, N_orientions, g_mag, tol_interval, i_max_g)
-            end
-
-            # Dynamics
-            Qu_inv_tall::SMatrix{N_sens, N_sens, TT, N_sens^2} =
-                SMatrix{N_sens, N_sens, TT, N_sens^2}(cat(Qu_inv...; dims = (1,2)))
-            for n = 1:N_dynamics
-                u_n[n] = cat_u(u[:,n+N_orientions], Val{N_sens}())
-            end
-
-            dynamics!!(w, w_dot, s, u_n, Qu_inv_tall, r, Ng, tol_gs, i_max_w)
-
-            # @printf("%20s %.16e\n", "Dynamics", nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot, s))
-
-            # Positions
-            for n = 1:N_dynamics
-                Jrs[n] = J_r(w[n], w_dot[n])
-            end
-            for k = 2:Na
-                A_r, a_r = zero(SMatrix{3,3, TT}), zero(SVector{3, TT})
-                for n = 1:N_dynamics
-                    J = Jrs[n]'*Qu_inv[k]
-                    A_r += J*Jrs[n]
-                    a_r += J*(u[k,n + N_orientions] - s[n])
-                end
-                put!(r_out[k-1], (A_r, a_r))
-            end
-        elseif job_type == :Tb
-            r = take!(r_in)::SMatrix{3,Na,TT}
-            # println("Update r worker:")
-            # display(r)
-            # @printf("%20s %.16e\n", "Pos", nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot, s))
-            # Update u
-            for n = 1:N, k = 1:N_triads
-                # Static
-                if n <= N_orientions
-                    if k <= Na
-                        u[k,n] = -g[n]
-                    else
-                        u[k,n] = zero(SVector{3, TT})
-                    end
-                else
-                    n_d = n - N_orientions
-                    if k <= Na
-                        u[k,n] = Jrs[n_d]*r[:,k] + s[n_d]
-                    else
-                        u[k,n] = w[n_d]
-                    end
-                end
-            end
-            suff_stat_Tb_ref(y[1,:], Q_inv[1], u[1,:], Ns, Tb_out[1])
-            suff_stat_Tb(y, Q_inv, u, Ns, Tb_out[2:end])
-        elseif job_type == :nlopg
-            T, b = take!(Tb_in)
-            # take!(Tb_in)
-            # @printf("%20s %.16e\n", "Tb", nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot, s))
-            C = nlogp(y, u, T, b, Q_inv, Ns)
-            put!(nlogp_ch, C)
-        elseif job_type == :done
-            done = true
-            println("Shutdown")
-        else
-            throw(ErrorException("Incorrect phase: $(job)"))
-        end
-    end
-    nothing
-end
-function bcd(r0, T0, b0, y_s, y_d, Q_inv, Ns, Na , Ng, g_mag,
-    tol_bcd, i_max_bcd, tol_interval, i_max_g, tol_gs, i_max_w,
-    pool = workers(); callback = nothing)
-
-    Nt = Na + Ng
-
-    @assert istriu(T0[1])
-    @assert r0[:,1] == zeros(3)
-
-
-    TT = Float64
-    T_3x3 = SMatrix{3,3,TT}
-    V_3 = SVector{3, TT}
-
-    remote(x) = RemoteChannel(()-> x)
-
-    job = [Channel{Symbol}(4) |> remote for p in pool]
-    r_in = [Channel{typeof(r0)}(1) |> remote for p in pool]
-    r_out = [Channel{Tuple{T_3x3, V_3}}(1) |> remote for k = 1:Na-1, p in pool]
-    Tb_in = [Channel{Tuple{Vector{T_3x3}, Vector{V_3}}}(1) |> remote for p in pool]
-    Tb_out = map(pool) do p
-        vcat(
-        Channel{Tuple{SMatrix{9,9,TT}, SVector{9, TT}}}(1) |> remote,
-        [Channel{Tuple{SMatrix{12,12,TT}, SVector{12, TT}}}(1) |> remote for k = 1:Nt - 1]
-        )
-    end |> x -> hcat(x...)
-    logp_out = [Channel{TT}(1) |> remote for p in pool]
-
-    N_w = length(pool)
-    # Initial values
-    T = deepcopy(T0)
-    b = deepcopy(b0)
-    r = deepcopy(r0)
-    @async for n in 1:N_w
-        put!(r_in[n], r)
-        put!(Tb_in[n], (T, b))
-    end
-
-    (size_s, rest_s) = fldmod(size(y_s,2), N_w)
-    (size_d, rest_d) = fldmod(size(y_d,2), N_w)
-
-    for (k,p) in enumerate(pool)
-        if k == N_w
-            y_p = hcat(y_s[:,1 + size_s*(k-1):end], y_d[:,1 + size_d*(k-1):end])
-            Ns_p = Ns[1+size_s*(k-1):end]
-        else
-            slice_s = range(1 + size_s*(k-1), length = size_s)
-            slice_d = range(1 + size_d*(k-1), length = size_d)
-            y_p = hcat(y_s[:,slice_s], y_d[:,slice_d])
-            Ns_p = Ns[slice_s]
-        end
-        remote_do(do_work, p, y_p, Q_inv, Ns_p, Val{3*(Na+Ng)}(), Val{Na}(), Ng,
-                  g_mag, job[k], r_in[k], r_out[:,k], Tb_in[k], Tb_out[:,k], logp_out[k],
-                  tol_interval, i_max_g, tol_gs, i_max_w)
-    end
-
-    r_list = [@SVector zeros(TT,3) for k=1:Na]
-
-    k = 0
-    log_p_prev::TT = Inf
-    converged = false
-    while !converged
-        k += 1
-        @sync foreach(j -> put!(j, :eta_r), job)
-
-        # Workers do eta and r
-        for k = 1:Na-1
-            A_r, a_r = @sync mapreduce(n -> take!(r_out[k,n]), op, 1:N_w)
-            r_list[k+1] = A_r\a_r
-        end
-        r = hcat(r_list...)
-        # display(r)
-        @sync foreach(p -> put!(p, r), r_in)
-
-
-        @sync foreach(j -> put!(j, :Tb), job)
-        for k = 1:Nt
-            A_Tb, a_Tb = @sync mapreduce(n -> take!(Tb_out[k,n]), op, 1:N_w)
-            x = A_Tb\a_Tb
-            if k == 1
-                T[k] = T_ref(x[SVector{6,Int}(1:6 |> collect)])
-                b[k] = x[SVector{3,Int}(7:9 |> collect)]
-            else
-                T[k] = SMatrix{3,3}(reshape(x[1:9], 3,3))
-                b[k] = x[SVector{3,Int}(10:12 |> collect)]
-            end
-        end
-        @views normalize_diagonals!(T[1+Na:end])
-        foreach(p -> put!(p, (T,b)), Tb_in)
-
-
-        foreach(j -> put!(j, :nlopg), job)
-        log_p_val = @sync mapreduce(n-> take!(logp_out[n]), +, 1:N_w)
-        dlogp = log_p_prev - log_p_val
-
-        log_p_prev = log_p_val
-
-        if callback != nothing
-            callback(k, dlogp, log_p_val, r, T, b)
-        end
-
-        converged = k == i_max_bcd || abs(dlogp) < tol_bcd
-    end
-    foreach(j -> put!(j, :done), job)
-    return r, T, b
-end
-
 function get_callback(show_every = 1)
     function callback(k::Int, dlogp, log_p, r, T, b)
         if mod(k,show_every) == 0
@@ -743,13 +420,18 @@ function get_callback_maxdiff_param(r_true, T_true, b_true, show_every = 1)
     return callback
 
 end
-function bcd2!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens},
+################################################################################
+# BCD loop
+################################################################################
+function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens},
     ::Val{Na},
     tol_interval, i_max_g, tol_gs, i_max_w, tol_bcd, i_max_bcd;
     callback = nothing) where {TT, N_sens, Na}
 
     @assert istriu(T[1])
     @assert r[1] == zeros(3)
+    @assert length(T) == length(b) == size(y,1) == length(Q_inv)
+    @assert length(r) == Na
 
     N = size(y, 2)
     N_triads = size(y, 1)
@@ -778,6 +460,19 @@ function bcd2!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens},
 
     w_dot = [zero(SVector{3,TT}) for _ = 1:N_dynamics]
     s = [zero(SVector{3,TT}) for _ = 1:N_dynamics]
+
+    # WLS = zero(SMatrix{6, N_sens, TT})
+    H_m = zero(MMatrix{N_sens, 6, TT})
+    fill_H_constants!(H_m, Na)
+
+    # Buffs
+    y_pred = [zero(MVector{N_sens, TT}) for _ = 1:nthreads()]
+    J_m = map(1:nthreads()) do n
+        J = zero(MMatrix{N_sens, 3, TT})
+        fill_J_h_buff!(J, Na, Ng)
+        J
+    end
+
     Jrs = [zero(SMatrix{3,3,TT}) for _ = 1:N_dynamics]
     Tg = zero(MMatrix{3,3,TT})
 
@@ -787,6 +482,8 @@ function bcd2!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens},
     ii_T = SVector{9,Int}([1,2,3,4,5,6,7,8,9])
     ii_b = SVector{3,Int}([10,11,12])
 
+    inds_w_dot = SVector{3,Int}([1,2,3])
+    inds_s = SVector{3,Int}([4,5,6])
 
     k = 0
     log_p_prev::TT = Inf
@@ -812,8 +509,30 @@ function bcd2!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens},
             u_n[n] = SVector(u_m)
         end
 
-        dynamics_threads!!(w, w_dot, s, u_n, SMatrix(Qu_inv_tall), SMatrix(r_m), Ng,
-        tol_gs, i_max_w)
+
+        H!(H_m, r)
+        H = SMatrix(H_m)
+        H_T_Q_inv = H'*SMatrix(Qu_inv_tall)
+        H_T_Q_inv_H = H_T_Q_inv*H
+        WLS = H_T_Q_inv_H\H_T_Q_inv
+        P2 = H_T_Q_inv'*WLS
+        P = SMatrix(Qu_inv_tall) - P2
+
+        @threads for n = 1:N_dynamics
+            e = zero(SVector{N_sens, TT})
+            phi = zero(SVector{6, TT})
+            y_pred_i = y_pred[threadid()]
+            J_m_i = J_m[threadid()]
+
+            w[n] = gauss_newton(w[n], e, u_n[n], P, r_m, Ng, tol_gs, i_max_w,
+            y_pred_i, J_m_i)
+
+            h!(y_pred_i, w[n], r_m, Ng)
+            e = u_n[n] - SVector(y_pred_i)
+            phi = WLS*e
+            w_dot[n] = phi[inds_w_dot]
+            s[n] = phi[inds_s]
+        end
 
         # Positions
         @threads for n = 1:N_dynamics
@@ -851,7 +570,7 @@ function bcd2!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens},
             end
         end
 
-        # Ref T
+        # Ref Tb
         A_Tb_1, a_Tb_1 = zero(SMatrix{9,9, TT}), zero(SVector{9, TT})
         for n = 1:N
             A_1 = J_Tb_ref(u[1,n])
@@ -863,7 +582,7 @@ function bcd2!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens},
             a_Tb_1 += A_T_Q_inv_1*y[1,n]
         end
         x_1 = A_Tb_1\a_Tb_1
-        T[1] = BcdV3.T_ref(x_1[ii_T_1])
+        T[1] = T_ref(x_1[ii_T_1])
         b[1] = x_1[ii_b_1]
 
         # T and b estimation
@@ -897,6 +616,7 @@ function bcd2!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens},
             T[k+Na] = SMatrix(Tg)
         end
 
+        # Logp
         logp = nlogp(y, u, T, b, Q_inv, Ns)
         dlogp = log_p_prev - logp
         log_p_prev = logp
