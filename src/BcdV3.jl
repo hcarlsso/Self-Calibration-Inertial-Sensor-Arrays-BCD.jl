@@ -33,7 +33,8 @@ function nlogp(y::Matrix{SVector{3,type}}, u, T, b, Q_inv, Ns) where {type}
         end
     end
     # Average log likelihood
-    return C[]/prod(size(y))
+    N_triad_samples = N_triads*(sum(Ns) + N - N_orientions)/1.0e6
+    return C[]/N_triad_samples
 end
 function nlogp_naive(y::Matrix{SVector{3,type}}, Q_inv, Ns, r, T, b, g, w, w_dot, s) where {type}
     C = zero(type)
@@ -420,12 +421,32 @@ function get_callback_maxdiff_param(r_true, T_true, b_true, show_every = 1)
     return callback
 
 end
+
+function maxdiff(x::AbstractArray, y::AbstractArray)
+    res = real(zero(x[1] - y[1]))
+    @inbounds for i in 1:length(x)
+        delta = abs(x[i] - y[i])
+        if delta > res
+            res = delta
+        end
+    end
+    return res
+end
+function maxdiff(r, T, b, r_p, T_p, b_p)
+
+    dr = (maxdiff(r[k], r_p[k]) for k in eachindex(r))
+    dT = (maxdiff(T[k], T_p[k]) for k in eachindex(T))
+    db = (maxdiff(b[k], b_p[k]) for k in eachindex(b))
+
+    d = reduce(max, dr)
+    d = max(d, reduce(max, dT))
+    max(d, reduce(max, db))
+end
 ################################################################################
 # BCD loop
 ################################################################################
-function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens},
-    ::Val{Na},
-    tol_interval, i_max_g, tol_gs, i_max_w, tol_bcd, i_max_bcd;
+function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
+    tol_interval, i_max_g, tol_gs, i_max_w, tol_bcd_dlogp, tol_bcd_dx, i_max_bcd;
     callback = nothing) where {TT, N_sens, Na}
 
     @assert istriu(T[1])
@@ -486,9 +507,13 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens},
     inds_s = SVector{3,Int}([4,5,6])
 
     k = 0
+    r_p = copy(r)
+    T_p = copy(T)
+    b_p = copy(b)
     log_p_prev::TT = Inf
     dlogp = zero(TT)
     logp = zero(TT)
+    dx = zero(TT)
     converged = false
     while !converged
         k += 1
@@ -621,16 +646,24 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens},
         dlogp = log_p_prev - logp
         log_p_prev = logp
 
+        dx = maxdiff(r, T, b, r_p, T_p, b_p)
+
+        r_p .= r
+        T_p .= T
+        b_p .= b
+
         if callback != nothing
-            callback(k, dlogp, logp, r, T, b)
+            callback(k, dx, dlogp, logp, r, T, b)
         end
 
-        converged = k == i_max_bcd || abs(dlogp) < tol_bcd
+        converged = k == i_max_bcd || abs(dlogp) < tol_bcd_dlogp || dx < tol_bcd_dx
     end
     if k == i_max_bcd
-        @warn @sprintf(
-            "BCD: Max iterations %d reached. Criterion |dlopp| = %.2e < %.1e = tol \n",
-            k, abs(dlogp), tol_bcd
+        @warn join(
+        [@sprintf("BCD: Max iterations %d reached", k),
+         @sprintf("Criterion |dlopp| = %.2e < %.1e = tol",abs(dlogp), tol_bcd_dlogp),
+         @sprintf("Criterion ||dx||_∞ = %.2e < %.1e = tol", dx, tol_bcd_dx)],
+        "\n"
         )
     end
     return r, T, b
