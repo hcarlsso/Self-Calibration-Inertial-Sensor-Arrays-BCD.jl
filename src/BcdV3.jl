@@ -33,7 +33,13 @@ function nlogp(y::Matrix{SVector{3,type}}, u, T, b, Q_inv, Ns) where {type}
         end
     end
     # Average log likelihood
-    N_triad_samples = N_triads*(sum(Ns) + N - N_orientions)/1.0e6
+    if length(Ns) > 0
+        Ns_tot = sum(Ns)
+    else
+        Ns_tot = 0
+    end
+
+    N_triad_samples = N_triads*(Ns_tot + N - N_orientions)/1.0e6
     return C[]/N_triad_samples
 end
 function nlogp_naive(y::Matrix{SVector{3,type}}, Q_inv, Ns, r, T, b, g, w, w_dot, s) where {type}
