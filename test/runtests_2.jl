@@ -148,7 +148,7 @@ if true
     )
     trace_p = Dict(:r => [], :T => [], :b => [], :k => [])
 
-    println("BCD v2")
+    println("BCD v3")
 
 
     bcd!(

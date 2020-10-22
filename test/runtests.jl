@@ -3,18 +3,32 @@ using StaticArrays
 using MimuConstants
 using LinearAlgebra
 using Printf
+using Dates
 
 function get_callback_trace(trace, trace_p, show_every = 1)
-    function callback(k::Int, dlogp, log_p, r, T, b)
+    function callback(k::Int, dx, dlogp, log_p, r, T, b)
+        trace[:f][k] = log_p
+        trace[:f_abs][k] = dlogp
+        trace[:f_rel][k] = abs(dlogp)/abs(log_p)
+
+        trace[:x_abs][k] = dx
+
         if mod(k,show_every) == 0
-            @printf("%15d logp %.20e  dlogp %.8e\n", k, log_p, dlogp)
-            # @printf(" C_norm %.8e\n", tr(T[4])/3)
+            time = Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS")
+            @printf("%20s %7d logp %.16e dlogp % .8e ||dx|| %.8e\n",
+                    time, k, log_p, dlogp, trace[:x_abs][k])
+
+            # C = 0.0
+            # for k = 1:8
+            #     C += tr(T[k+8])
+            # end
+            # C /= (3*8)
+            # @printf(" C_norm %.8e\n", C)
             push!(trace_p[:r], Array(r))
             push!(trace_p[:T], Array.(T))
             push!(trace_p[:b], Array.(b))
             push!(trace_p[:k], k)
         end
-        trace[k] = log_p
     end
     return callback
 end
@@ -74,21 +88,30 @@ y_d_true = vcat(
 y_s = [y_s_true[k,n] + 0.0*(k <= Na ? sig_a : sig_g)*randn(3)/sqrt(N_per_orientation) for k = 1:Nt, n = 1:N_orientions]
 y_d = [y_d_true[k,n] + 0.0*( k <= Na ? sig_a : sig_g)*randn(3) for k = 1:Nt, n = 1:N]
 
+y = hcat(y_s, y_d)
 Q_inv = [SMatrix{3,3,Float64}(I)/( k <= Na ? sig_a^2 :  sig_g^2) for k = 1:Nt]
 
 b0 = [b_n + 1.0e-2*randn(3) for  b_n in b]
 T0 = [T[k] + 1.0e-3*(k == 1 ? triu(randn(3,3)) : randn(3,3))  for k = 1:Nt]
 r0_m = copy(r_m)
 r0_m[:,2:end] += 1.0e-3*randn(3,Na-1)
-r0 = SMatrix{3,Na}(r0_m)
+r0 = [SVector{3}(r0_m[:,k]) for k = 1:Na]
 
-trace_log_p = zeros(N_bcd)
+trace = Dict(
+:f => zeros(N_bcd),
+:f_abs => zeros(N_bcd),
+:f_rel => zeros(N_bcd),
+:x_abs => zeros(N_bcd)
+)
 trace_p = Dict(:r => [], :T => [], :b => [], :k => [])
+r_hat = copy(r0)
+T_hat = copy(T0)
+b_hat = copy(b0)
 
-println("BCD v2")
-r_hat, T_hat, b_hat = @time bcd(
-    r0, T0, b0, y_s, y_d, Q_inv, Ns, Na , Ng, g_mag, tol_dlogp, N_bcd,
-    1.0e-12, 100, 1.0e-13, 200, pool;
-    # callback = callback
-    callback = get_callback_trace(trace_log_p, trace_p, show_every) #callback
+r_hat, T_hat, b_hat, eta = @time  bcd!(
+    r_hat, T_hat, b_hat, y, Q_inv, Ns, g_mag, Val{3*(Na+Ng)}(),Val{Na}(),
+    1.0e-12, 100, 1.0e-13, 200, tol_dlogp, 1.0-14, N_bcd;
+    callback = get_callback_trace(
+        trace, trace_p, show_every
+    ) #callback
 )

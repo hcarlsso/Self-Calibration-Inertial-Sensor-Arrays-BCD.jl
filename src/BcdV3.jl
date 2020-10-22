@@ -666,7 +666,13 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
         "\n"
         )
     end
-    return r, T, b
+    eta = Dict(
+        :w => w,
+        :w_dot => w_dot,
+        :s => s,
+        :g => g
+    )
+    return r, T, b, eta
 end
 
 
