@@ -83,11 +83,11 @@ g_mag = 9.81
 Random.seed!(1)
 
 b = [@SVector randn(3) for k = 1:Nt]
-# T = [I + 1.0e-3*@SMatrix randn(3,3) for k = 1:Nt]
-# T[1] = I + 1.0e-3*SMatrix{3,3, Float64}(triu(randn(3,3)))
-T = [I + @SMatrix zeros(3,3) for k = 1:Nt]
-# b = [@SVector zeros(3) for k = 1:Nt]
+T = [I + 1.0e-3*@SMatrix randn(3,3) for k = 1:Nt]
+T[1] = I + 1.0e-3*SMatrix{3,3, Float64}(triu(randn(3,3)))
 
+# T = [I + @SMatrix zeros(3,3) for k = 1:Nt]
+# b = [@SVector zeros(3) for k = 1:Nt]
 # r = [SVector{3}(r_m[:,k])*100 for k = 1:Na]
 
 
