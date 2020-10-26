@@ -355,7 +355,7 @@ function dynamics(w0::Vector{SVector{3,T}}, u, Qu_inv, r, Ng, ::Val{N_sens},
         SMatrix{N_sens, N_sens, T, N_sens^2}(cat(Qu_inv...; dims = (1,2)))
     u_n = [zero(SVector{N_sens,T}) for _ = 1:N_dynamics]
     for n = 1:N_dynamics
-        u_n[n] = cat_u(u[:,n], Val{N_sens}())
+        u_n[n] = vcat(u[:,n]...)
     end
     w = [copy(w0_n) for w0_n in w0]
     dynamics!!(w, w_dot, s, u_n, Qu_inv_tall, r, Ng, tol_gs, i_max_w)
@@ -366,9 +366,9 @@ function dynamics!!(w::Vector{SVector{3,T}}, w_dot::Vector{SVector{3,T}}, s::Vec
     u::Vector{SVector{N,T}}, Qu_inv::SMatrix{N,N,T},
     r, Ng, g_tol, i_max) where{N,T}
     N_dynamics = length(w)
+    Na = size(r, 2)
 
     H_m = zero(MMatrix{N, 6, T})
-    Na = size(r, 2)
     fill_H_constants!(H_m, Na)
     H!(H_m, r)
     H = SMatrix(H_m)
@@ -387,10 +387,10 @@ function dynamics!!(w::Vector{SVector{3,T}}, w_dot::Vector{SVector{3,T}}, s::Vec
     WLS = (H_T_Q_inv*H)\H_T_Q_inv
     P = Qu_inv - H_T_Q_inv'*WLS
 
-
+    r_m = hcat(r...)
     for n = 1:N_dynamics
-        w[n] = gauss_newton(w[n], e, u[n], P, r, Ng, g_tol, i_max, y_pred, J_m)
-        h!(y_pred, w[n], r, Ng)
+        w[n] = gauss_newton(w[n], e, u[n], P, r_m, Ng, g_tol, i_max, y_pred, J_m)
+        h!(y_pred, w[n], r_m, Ng)
         e = u[n] - SVector(y_pred)
         phi = WLS*e
         w_dot[n] = phi[inds_w_dot]
@@ -453,7 +453,7 @@ end
 ################################################################################
 function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
     tol_interval, i_max_g, tol_gs, i_max_w, tol_bcd_dlogp, tol_bcd_dx, i_max_bcd;
-    callback = nothing) where {TT, N_sens, Na}
+    callback = nothing, warn = true, w0 = nothing) where {TT, N_sens, Na}
 
     @assert istriu(T[1])
     @assert r[1] == zeros(3)
@@ -481,8 +481,12 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
     u_n = [zero(SVector{N_sens,TT}) for _ = 1:N_dynamics]
     Qu_inv_tall = zero(MMatrix{N_sens, N_sens, TT, N_sens^2})
     # Initial w0 from gyroscopes
-    w = map(1:N_dynamics) do n
-        mapreduce(k -> y[Na + k, n + N_orientions], +, 1:Ng)/Ng
+    if w0 == nothing
+        w = map(1:N_dynamics) do n
+            mapreduce(k -> y[Na + k, n + N_orientions], +, 1:Ng)/Ng
+        end
+    else
+        w = copy(w0)
     end
 
     w_dot = [zero(SVector{3,TT}) for _ = 1:N_dynamics]
@@ -664,7 +668,7 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
 
         converged = k == i_max_bcd || abs(dlogp) < tol_bcd_dlogp || dx < tol_bcd_dx
     end
-    if k == i_max_bcd
+    if k == i_max_bcd && warn
         @warn join(
         [@sprintf("BCD: Max iterations %d reached", k),
          @sprintf("Criterion |dlopp| = %.2e < %.1e = tol",abs(dlogp), tol_bcd_dlogp),
