@@ -17,10 +17,11 @@ export
 
 
 function nlogp(y::Matrix{SVector{3,type}}, u, T, b, Q_inv, Ns) where {type}
-    C = Atomic{type}(0.0)
+    # C = Atomic{type}(0.0)
     N = size(y,2)
     N_triads = size(y,1)
     N_orientions = length(Ns)
+    e2 = zeros(type, N_triads, N)
     @threads for n = 1:N
         for k = 1:N_triads
             e = T[k]*u[k,n] + b[k] - y[k,n]
@@ -29,18 +30,19 @@ function nlogp(y::Matrix{SVector{3,type}}, u, T, b, Q_inv, Ns) where {type}
                 c_k_n *= Ns[n]
             end
             # C += c_k_n
-            atomic_add!(C,c_k_n)
+            # atomic_add!(C,c_k_n)
+            e2[k,n] = c_k_n
         end
     end
     # Average log likelihood
     if length(Ns) > 0
         Ns_tot = sum(Ns)
     else
-        Ns_tot = 0
+        Ns_tot = N_orientions
     end
 
-    N_triad_samples = N_triads*(Ns_tot + N - N_orientions)/1.0e6
-    return C[]/N_triad_samples
+    N_triad_samples = N_triads*(Ns_tot + N - N_orientions)
+    return sum(e2)/N_triad_samples
 end
 function nlogp_naive(y::Matrix{SVector{3,type}}, Q_inv, Ns, r, T, b, g, w, w_dot, s) where {type}
     C = zero(type)
@@ -455,6 +457,7 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
     tol_interval, i_max_g, tol_gs, i_max_w, tol_bcd_dlogp, tol_bcd_dx, i_max_bcd;
     callback = nothing, warn = true, w0 = nothing) where {TT, N_sens, Na}
 
+    display(T[1])
     @assert istriu(T[1])
     @assert r[1] == zeros(3)
     @assert length(T) == length(b) == size(y,1) == length(Q_inv)
