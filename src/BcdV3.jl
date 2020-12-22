@@ -8,6 +8,7 @@ using Base.Threads
 
 export
     bcd!,
+    bcd,
     get_callback,
     get_callback_maxdiff_param,
     Ω,
@@ -404,13 +405,12 @@ end
 # Callbacks
 ################################################################################
 function get_callback(show_every = 1)
-    function callback(k::Int, dlogp, log_p, r, T, b)
+    function callback(k::Int, dx, dlogp, log_p, r, T, b)
         if mod(k,show_every) == 0
-            @printf("%15d logp %.20e  dlogp %.8e\n", k, log_p, dlogp)
-            # @printf(" C_norm %.8e\n", tr(T[4])/3)
+            @printf("%9d logp %.18e  dlogp % .5e dx % .5e\n", k, log_p, dlogp, dx)
         end
     end
-    return
+    return callback
 end
 function get_callback_maxdiff_param(r_true, T_true, b_true, show_every = 1)
 
@@ -454,8 +454,9 @@ end
 # BCD loop
 ################################################################################
 function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
-    tol_interval, i_max_g, tol_gs, i_max_w, tol_bcd_dlogp, tol_bcd_dx, i_max_bcd;
-    callback = nothing, warn = true, w0 = nothing) where {TT, N_sens, Na}
+              tol_interval, i_max_g, tol_gs, i_max_w, tol_bcd_dlogp, tol_bcd_dx, i_max_bcd;
+              callback = nothing, warn = true, w0 = nothing,
+              update_Ta = true, update_Tg = true) where {TT, N_sens, Na}
 
     display(T[1])
     @assert istriu(T[1])
@@ -469,6 +470,7 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
     N_orientions = length(Ns)
     N_dynamics = N - N_orientions
 
+    println("N dynamics: ", N_dynamics)
     r_m = zero(MMatrix{3,Na,TT})
     for k = 2:Na
         r_m[:,k] = r[k]
@@ -518,6 +520,16 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
 
     inds_w_dot = SVector{3,Int}([1,2,3])
     inds_s = SVector{3,Int}([4,5,6])
+
+    if update_Ta && update_Tg
+        slice = 2:N_triads
+    elseif update_Ta && !update_Tg
+        slice = 2:Na
+    elseif !update_Ta && update_Tg
+        slice = Na+1:N_triads
+    else
+        slice = 2:0
+    end
 
     k = 0
     r_p = copy(r)
@@ -609,24 +621,33 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
         end
 
         # Ref Tb
-        A_Tb_1, a_Tb_1 = zero(SMatrix{9,9, TT}), zero(SVector{9, TT})
-        for n = 1:N
-            A_1 = J_Tb_ref(u[1,n])
-            A_T_Q_inv_1 = A_1'*Q_inv[1]
-            if n <= N_orientions
-                A_T_Q_inv_1 *= Ns[n]
+        if update_Ta
+            A_Tb_1, a_Tb_1 = zero(SMatrix{9,9, TT}), zero(SVector{9, TT})
+            for n = 1:N
+                A_1 = J_Tb_ref(u[1,n])
+                A_T_Q_inv_1 = A_1'*Q_inv[1]
+                if n <= N_orientions
+                    A_T_Q_inv_1 *= Ns[n]
+                end
+                A_Tb_1 += A_T_Q_inv_1*A_1
+                a_Tb_1 += A_T_Q_inv_1*y[1,n]
             end
-            A_Tb_1 += A_T_Q_inv_1*A_1
-            a_Tb_1 += A_T_Q_inv_1*y[1,n]
+            x_1 = A_Tb_1\a_Tb_1
+            T[1] = T_ref(x_1[ii_T_1])
+            b[1] = x_1[ii_b_1]
         end
-        x_1 = A_Tb_1\a_Tb_1
-        T[1] = T_ref(x_1[ii_T_1])
-        b[1] = x_1[ii_b_1]
 
         # T and b estimation
-        @threads for k = 2:size(y,1)
+        # Dont update T_g if only static measurements
+        if N_dynamics == 0
+            N_t = Na
+        else
+            N_t = N_triads
+        end
+        @threads for k = slice
             A_Tb, a_Tb = zero(SMatrix{12,12, TT}), zero(SVector{12, TT})
-            for n = 1:size(y,2)
+
+            for n = 1:N
                 A = J_Tb(u[k,n])
                 A_T_Q_inv = A'*Q_inv[k]
                 if n <= N_orientions
@@ -635,23 +656,26 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
                 A_Tb += A_T_Q_inv*A
                 a_Tb += A_T_Q_inv*y[k,n]
             end
+
             x = A_Tb\a_Tb
             T[k] = SMatrix{3,3, TT}(reshape(x[ii_T], 3,3))
             b[k] = x[ii_b]
         end
 
         # Normalize Tg
-        C::TT = 0.0
-        for k = 1:Ng
-            C += tr(T[k+Na])
-        end
-        C /= (3*Ng)
-        for k = 1:Ng
-            Tg .= MMatrix(T[k+Na])
-            for i = 1:3
-                Tg[i,i] /= C
+        if update_Tg
+            C::TT = 0.0
+            for k = 1:Ng
+                C += tr(T[k+Na])
             end
-            T[k+Na] = SMatrix(Tg)
+            C /= (3*Ng)
+            for k = 1:Ng
+                Tg .= MMatrix(T[k+Na])
+                for i = 1:3
+                    Tg[i,i] /= C
+                end
+                T[k+Na] = SMatrix(Tg)
+            end
         end
 
         # Logp
@@ -688,5 +712,40 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
     return r, T, b, eta
 end
 
+function bcd(r, T, b, y, Q_inv, Ns, g_mag,
+    tol_interval, i_max_g, tol_gs, i_max_w, tol_bcd_dlogp, tol_bcd_dx, i_max_bcd;
+    kwargs...)
+
+    TT = Float64
+
+    Na = size(r,2)
+    Nt = size(T,3)
+
+    rs = [SVector{3,TT}(r[:,k]) for k = 1:Na]
+    bs = [SVector{3,TT}(b[:,k]) for k = 1:Nt]
+    Ts = [SMatrix{3,3,TT}(T[:,:,k]) for k = 1:Nt]
+
+    ys = [SVector{3,TT}(y[1+3(k-1):3*k, n]) for k = 1:Nt, n = 1:size(y,2)]
+    Q_inv_s = [SMatrix{3,3,TT}(Q_inv[:,:,k]) for k = 1:Nt]
+
+    r_hat, T_hat, b_hat, eta_hat = bcd!(rs, Ts, bs, ys, Q_inv_s, Ns, g_mag,
+                                        Val{3*Nt}(),Val{Na}(),
+                                        tol_interval, i_max_g,
+                                        tol_gs, i_max_w,
+                                        tol_bcd_dlogp, tol_bcd_dx, i_max_bcd;
+                                        kwargs...)
+
+    eta = map(eta_hat |> collect) do (k,v)
+        a = hcat(Array.(v)...)
+        (k,a)
+    end |> Dict
+    theta = Dict(
+        :r => hcat(Array.(r_hat)...),
+        :b => hcat(Array.(b_hat)...),
+        :T => cat(Array.(T_hat)...; dims = 3)
+    )
+
+    theta, eta
+end
 
 end # module
