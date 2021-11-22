@@ -1,7 +1,3 @@
-using Random
-
-Random.seed!(1)
-
 function get_callback_trace(trace, trace_p, show_every = 1)
     function callback(k::Int, dx, dlogp, log_p, p)
         trace[:f][k] = log_p
@@ -56,7 +52,8 @@ theta_m, eta_m, conv = bcd!(
     1.0e-12, 100, 1.0e-13, 200, tol_dlogp, 1.0-14, N_bcd;
     callback = get_callback_trace(
         trace, trace_p, show_every
-    )
+    ),
+    # verbose = true
 )
 
 # end

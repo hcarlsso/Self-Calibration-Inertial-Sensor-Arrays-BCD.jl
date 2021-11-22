@@ -2,7 +2,6 @@ module BcdV3
 
 using StaticArrays
 using LinearAlgebra
-using Distributed
 using Printf
 using Base.Threads
 
@@ -35,18 +34,11 @@ function nlogp(y::Matrix{SVector{3,type}}, u, T, b, Q_inv, Ns) where {type}
             e2[k,n] = c_k_n
         end
     end
-    # Average log likelihood
-    if length(Ns) > 0
-        Ns_tot = sum(Ns)
-    else
-        Ns_tot = N_orientions
-    end
 
-    N_triad_samples = N_triads*(Ns_tot + N - N_orientions)
-    return sum(e2)/N_triad_samples
+    return sum(e2)
 end
 function nlogp(y::AbstractMatrix{type}, u, T, b, Q_inv, Ns) where {type}
-    # C = Atomic{type}(0.0)
+
     N = size(y,2)
     inds = reshape(1:size(y,1),3,:)
     N_triads = size(inds,2)
@@ -60,8 +52,6 @@ function nlogp(y::AbstractMatrix{type}, u, T, b, Q_inv, Ns) where {type}
             if n <= N_orientions
                 c_k_n *= Ns[n]
             end
-            # C += c_k_n
-            # atomic_add!(C,c_k_n)
             e2[k,n] = c_k_n
         end
     end
@@ -672,7 +662,7 @@ end
 ################################################################################
 function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
               tol_interval, i_max_g, tol_gs, i_max_w, tol_bcd_dlogp, tol_bcd_dx, i_max_bcd;
-              callback = nothing, warn = true, w0 = nothing,
+              callback = nothing, warn = true, w0 = nothing, verbose = false,
               update_Ta = true, update_Tg = true) where {TT, N_sens, Na}
 
     display(T[1])
@@ -763,11 +753,22 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
 
         inverse_affine!(u, y, T, b)
         inverse_affine_Q!(Qu_inv, Q_inv, T)
-        l1 = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "1: %.3e\n" l1
+
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "1: %.3e\n" lc
+            lp = lc
+        end
+
         gravity!(g, u, Qu_inv, Na, N_orientions, g_mag, tol_interval, i_max_g)
-        l2 = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "2: %.3e diff %.3e\n" l2 l1-l2
+
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "2: %.3e diff %.3e\n" lc lp-lc
+            lp = lc
+        end
+
+        # Dynamics
         for k = 1:N_triads
             kk = 1+3*(k-1):3*k
             Qu_inv_tall[kk,kk] = Qu_inv[k]
@@ -787,7 +788,7 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
         WLS = H_T_Q_inv_H\H_T_Q_inv
         P2 = H_T_Q_inv'*WLS
         P = SMatrix(Qu_inv_tall) - P2
-        display(P)
+
         @threads for n = 1:N_dynamics
             e = zero(SVector{N_sens, TT})
             phi = zero(SVector{6, TT})
@@ -803,17 +804,12 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
             w_dot[n] = phi[inds_w_dot]
             s[n] = phi[inds_s]
         end
-        println("WLS:")
-        display(WLS)
 
-        println("u:")
-        display( hcat((u_n .|> Array)... ))
-
-        println("u_pred:")
-        display( hcat((u_pred_all .|> Array)... ))
-
-        l3 = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "3: %.3e diff %.3e\n" l3 l2-l3
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "3: %.3e diff %.3e\n" lc lp-lc
+            lp = lc
+        end
 
         # Positions
         @threads for n = 1:N_dynamics
@@ -829,8 +825,13 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
             r[k] = A_r\a_r
             r_m[:,k] = r[k]
         end
-        l4 = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "4: %.3e diff %.3e\n" l4 l3-l4
+
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "4: %.3e diff %.3e\n" lc lp-lc
+            lp = lc
+        end
+
         # Update u
         @threads for n = 1:N
             for k = 1:N_triads
@@ -868,15 +869,14 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
             T[1] = T_ref(x_1[ii_T_1])
             b[1] = x_1[ii_b_1]
         end
-        l5 = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "5: %.3e diff %.3e\n" l5 l4-l5
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "5: %.3e diff %.3e\n" lc lp-lc
+            lp = lc
+        end
+
         # T and b estimation
         # Dont update T_g if only static measurements
-        if N_dynamics == 0
-            N_t = Na
-        else
-            N_t = N_triads
-        end
         @threads for k = slice
             A_Tb, a_Tb = zero(SMatrix{12,12, TT}), zero(SVector{12, TT})
 
@@ -894,8 +894,13 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
             T[k] = SMatrix{3,3, TT}(reshape(x[ii_T], 3,3))
             b[k] = x[ii_b]
         end
-        l6 = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "6: %.3e diff %.3e\n" l6 l5-l6
+
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "6: %.3e diff %.3e\n" lc lp-lc
+            lp = lc
+        end
+
         # Normalize Tg
         if update_Tg
             C::TT = 0.0
@@ -911,8 +916,13 @@ function bcd!(r,T,b, y, Q_inv, Ns, g_mag::TT, ::Val{N_sens}, ::Val{Na},
                 T[k+Na] = SMatrix(Tg)
             end
         end
-        l7 = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "7: %.3e diff %.3e\n" l7 l6-l7
+
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "7: %.3e diff %.3e\n" lc lp-lc
+            lp = lc
+        end
+
         # Logp
         logp = nlogp(y, u, T, b, Q_inv, Ns)
         dlogp = log_p_prev - logp
@@ -1005,7 +1015,6 @@ function bcd!(r::AbstractMatrix{type}, T::AbstractArray{type,3}, b::AbstractMatr
     N = size(y,2)
     N_orientions = length(Ns)
     N_dynamics = N - N_orientions
-
     if verbose
         println("N dynamics: ", N_dynamics)
         println("N orientations: ", N_orientions)
@@ -1067,25 +1076,29 @@ function bcd!(r::AbstractMatrix{type}, T::AbstractArray{type,3}, b::AbstractMatr
 
         inverse_affine!(u, y, T, b)
         inverse_affine_Q!(Qu_inv, Q_inv, T)
-        lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "1: %.3e\n" lc
-        lp = lc
 
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "1: %.3e\n" lc
+            lp = lc
+        end
 
         gravity!(g, u[1:3*Na,1:N_orientions], Qu_inv, g_mag, tol_interval, i_max_g)
-        lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "2: %.3e diff %.3e\n" lc lp-lc
-        lp = lc
 
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "2: %.3e diff %.3e\n" lc lp-lc
+            lp = lc
+        end
 
+        # Dynamics
         H!(H, r)
-
         # Since H is zero for gyro scope measurements
         # P = Q_inv - Q_inv*H*(H'*Q_inv*H)^{-1}*H'*Q_inv
         WLS = (H'*Qu_inv*H)\(H'*Qu_inv)
         P = Qu_inv  - Qu_inv*H*WLS
         u_dyn = u[:,1 + N_orientions:end]
-        for n = 1:N_dynamics
+        @threads for n = 1:N_dynamics
 
             if verbose
                 println("GS iteration: $(n)")
@@ -1101,29 +1114,22 @@ function bcd!(r::AbstractMatrix{type}, T::AbstractArray{type,3}, b::AbstractMatr
 
             @views h!(u_dyn_pred[:,n], w[:,n], r, Ng)
         end
-        println("WLS:")
-        display(WLS)
-
-        println("u:")
-        display(u_dyn)
-
-        println("u_pred:")
-        display(u_dyn_pred)
 
         phi = WLS*(u_dyn - u_dyn_pred)
-
         w_dot[:,:] = phi[1:3,:]
         s[:,:] = phi[4:6,:]
 
-        lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "3: %.3e diff %.3e\n" lc lp-lc
-        lp = lc
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "3: %.3e diff %.3e\n" lc lp-lc
+            lp = lc
+        end
 
         # Positions
-        for n = 1:N_dynamics
+        @threads for n = 1:N_dynamics
             Jrs[:,:,n] = J_r(w[:,n], w_dot[:,n])
         end
-        for k = 2:Na
+        @threads for k = 2:Na
             kk = inds[:,k]
             A_r, a_r = zeros(type,3,3), zeros(type,3)
             for n = 1:N_dynamics
@@ -1134,12 +1140,13 @@ function bcd!(r::AbstractMatrix{type}, T::AbstractArray{type,3}, b::AbstractMatr
             r[:,k] = A_r\a_r
         end
 
-        lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "4: %.3e diff %.3e\n" lc lp-lc
-        lp = lc
-
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "4: %.3e diff %.3e\n" lc lp-lc
+            lp = lc
+        end
         # Update u
-        for n = 1:N
+        @threads for n = 1:N
             for k = 1:N_triads
                 kk = inds[:,k]
                 # Static
@@ -1176,11 +1183,14 @@ function bcd!(r::AbstractMatrix{type}, T::AbstractArray{type,3}, b::AbstractMatr
             T[:,:,1] = T_ref(x_1[1:6])
             b[:,1] = x_1[7:9]
         end
-        lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "5: %.3e diff %.3e\n" lc lp-lc
-        lp = lc
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "5: %.3e diff %.3e\n" lc lp-lc
+            lp = lc
+        end
 
-        for k = slice
+        # T and b estimation
+        @threads for k = slice
             A_Tb, a_Tb = zeros(type,12,12), zeros(type,12)
             kk = inds[:,k]
             for n = 1:N
@@ -1198,10 +1208,11 @@ function bcd!(r::AbstractMatrix{type}, T::AbstractArray{type,3}, b::AbstractMatr
             b[:,k] = x[10:12]
         end
 
-        lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "6: %.3e diff %.3e\n" lc lp-lc
-        lp = lc
-
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "6: %.3e diff %.3e\n" lc lp-lc
+            lp = lc
+        end
         # Normalize Tg
         if update_Tg
             C::type = 0.0
@@ -1213,9 +1224,12 @@ function bcd!(r::AbstractMatrix{type}, T::AbstractArray{type,3}, b::AbstractMatr
                 T[:,:,k+Na] ./= C
             end
         end
-        lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
-        @printf "7: %.3e diff %.3e\n" lc lp-lc
-        lp = lc
+
+        if verbose
+            lc = nlogp_naive(y, Q_inv, Ns, r, T, b, g, w, w_dot,s)
+            @printf "7: %.3e diff %.3e\n" lc lp-lc
+            lp = lc
+        end
 
         # Logp
         logp = nlogp(y, u, T, b, Q_inv, Ns)

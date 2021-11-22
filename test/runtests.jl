@@ -6,6 +6,7 @@ using Printf
 using Dates
 using Random
 Random.seed!(1)
+
 function InitialPosMIMU4444BT()
     dx = 0.0063; dy = 0.0063; dz = 0.001;
     r = [-1.5*dx  0.5*dy  1*dz;   #  1
@@ -120,7 +121,7 @@ N = 40 # Dyn
 N_per_orientation = Int(N/5)
 Ns = ones(Int, N_orientions).*N_per_orientation
 show_every = 1
-N_bcd  = 1
+N_bcd  = 3
 tol_dlogp = 1.0e-9
 
 Nt = Na + Ng
@@ -178,5 +179,6 @@ r_hat, T_hat, b_hat, eta = @time  bcd!(
     1.0e-12, 100, 1.0e-13, 200, tol_dlogp, 1.0-14, N_bcd;
     callback = get_callback_trace(
         trace, trace_p, show_every
-    ) #callback
+    ), #callback
+    verbose = false
 );
